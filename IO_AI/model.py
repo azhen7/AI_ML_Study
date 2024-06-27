@@ -140,10 +140,14 @@ def model():
 
     # train
     for epoch in range(EPOCHS):  # loop over the dataset multiple times
-        # update learning rate to 10x reduction from initial
+        # update learning rate at epoch 20 to 10x reduction from initial
         if epoch == 20:
             for param_group in optimizer.param_groups:
                 param_group['lr'] = 0.0001
+        # update learning rate at epoch 50 to 10x from at epoch 20
+        if epoch == 50:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = 0.00001
         
         print(f"--------------- Epoch {epoch + 1} ---------------")
 
@@ -217,7 +221,7 @@ def load_model(testloader):
     #     print(f'Validation accuracy (adversarials) with epsilon {epsilon}: {valid_epoch_acc:.3f} %')
 
     # check accuracy of model using adversarial images with 2/255 epsilon applied on middle 16x16 and 8/255 applied on the rest
-    valid_epoch_acc = validate_with_adversarial_examples_diff_epsilons(
+    valid_epoch_acc = validate_with_adversarials_using_two_epsilons(
         model,
         testloader,
         optimizer,
@@ -240,8 +244,16 @@ def denorm(batch, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]):
     std = torch.tensor(std).to(DEVICE)
     return batch * std.view(1, -1, 1, 1) + mean.view(1, -1, 1, 1)
 
+# generates adversarial image with 1 epsilon applied in middle 16x16 and another epsilon applied everywhere else
+def generate_adversarial_two_epsilons(image, eps1, eps2, data_grad):
+    sign_data_grad = data_grad.sign()
+    adversarial = image + eps1 * sign_data_grad # apply eps1 on entire image
+    adversarial[:, :, 8:24, 8:24] = image[:, :, 8:24, 8:24] + eps2 * sign_data_grad[:, :, 8:24, 8:24] # slice middle
+    adversarial = torch.clamp(adversarial, 0, 1) # clamp in [0, 1]
+    return adversarial
+
 # check accuracy with one epsilon applied on middle 16x16 and another epsilon applied on the rest
-def validate_with_adversarial_examples_diff_epsilons(model, testloader, optimizer, criterion, overall_eps, center_eps):
+def validate_with_adversarials_using_two_epsilons(model, testloader, optimizer, criterion, overall_eps, center_eps):
     model.train()
     correct = 0
     for _, data in enumerate(testloader, 0):
@@ -268,43 +280,82 @@ def validate_with_adversarial_examples_diff_epsilons(model, testloader, optimize
         # unnormalize to [0, 1]
         images_denorm = denorm(inputs)
         # generate adversarial
-        adversarials = generate_adversarial(images_denorm, overall_eps, img_grad)
+        adversarials = generate_adversarial_two_epsilons(images_denorm, overall_eps, center_eps, img_grad)
         # re-normalize back to [-1, 1]
         adversarials_norm = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))(adversarials)
-
-        # STEP 3: Generate adversarial image of center 16x16
-        # crop center 16x16
-        images_center = v2.CenterCrop(size=16)(inputs)
-        # crop center 16x16 of image gradient
-        img_grad_center = v2.CenterCrop(size=16)(img_grad)
-        # unnormalize to [0, 1]
-        img_center_denorm = denorm(images_center)
-        # generate adversarial
-        adversarials_center = generate_adversarial(img_center_denorm, center_eps, img_grad_center)
-        # re-normalize
-        adversarials_center_norm = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))(adversarials_center)
-
-        plot_examples(inputs.to(torch.device("cpu")))
-        plot_examples(adversarials_norm.to(torch.device("cpu")))
-        plot_examples(images_center.to(torch.device("cpu")))
-
-        # STEP 4: Re-copy 16x16
-        for k1 in range(4): # copy for all 4 tensors per batch
-            for k2 in range(3): # copy over all 3 color channels per image
-                for i in range(16):
-                    for j in range(16):
-                        adversarials_norm[k1][k2][i + 7][j + 7] = adversarials_center_norm[k1][k2][i][j]
 
         # predict on model
         adv_outputs = model(adversarials_norm)
         # get number of correct
         correct += (torch.argmax(adv_outputs, 1) == labels).sum().item()
-
-        plot_examples(adversarials_center_norm.to(torch.device("cpu")))
-        plot_examples(adversarials_norm.to(torch.device("cpu")))
     
     accuracy = 100.0 * correct / len(trainset)
     return accuracy
+
+# def validate_with_adversarials_using_two_epsilons2(model, testloader, optimizer, criterion, overall_eps, center_eps):
+#     model.train()
+#     correct = 0
+#     for _, data in enumerate(testloader, 0):
+#         # STEP 1: Train the model on the original image to obtain gradient
+#         # get the inputs; data is a list of [inputs, labels]
+#         inputs, labels = data
+#         inputs = inputs.to(DEVICE)
+#         labels = labels.to(DEVICE)
+#         inputs.requires_grad = True
+#         # zero the parameter gradients
+#         optimizer.zero_grad()
+#         # get outputs
+#         outputs = model(inputs)
+#         # compute loss, go backwards
+#         loss = criterion(outputs, labels)
+#         # backpropagation
+#         loss.backward()
+#         # commented out because we don't actually want to update weights in the model; we just want to get the gradients
+#         # optimizer.step()
+
+#         # STEP 2: Generate adversarial image of whole
+#         # get gradients of image
+#         img_grad = inputs.grad.data
+#         # unnormalize to [0, 1]
+#         images_denorm = denorm(inputs)
+#         # generate adversarial
+#         adversarials = generate_adversarial(images_denorm, overall_eps, img_grad)
+#         # re-normalize back to [-1, 1]
+#         adversarials_norm = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))(adversarials)
+
+#         # STEP 3: Generate adversarial image of center 16x16
+#         # crop center 16x16
+#         images_center = v2.CenterCrop(size=16)(inputs)
+#         # crop center 16x16 of image gradient
+#         img_grad_center = v2.CenterCrop(size=16)(img_grad)
+#         # unnormalize to [0, 1]
+#         img_center_denorm = denorm(images_center)
+#         # generate adversarial
+#         adversarials_center = generate_adversarial(img_center_denorm, center_eps, img_grad_center)
+#         # re-normalize
+#         adversarials_center_norm = transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))(adversarials_center)
+
+#         # plot_examples(inputs)
+#         # plot_examples(adversarials_norm)
+#         # plot_examples(images_center)
+
+#         # STEP 4: Re-copy 16x16
+#         for k1 in range(4): # copy for all 4 tensors per batch
+#             for k2 in range(3): # copy over all 3 color channels per image
+#                 for i in range(16):
+#                     for j in range(16):
+#                         adversarials_norm[k1][k2][i + 8][j + 8] = adversarials_center_norm[k1][k2][i][j]
+
+#         # predict on model
+#         adv_outputs = model(adversarials_norm)
+#         # get number of correct
+#         correct += (torch.argmax(adv_outputs, 1) == labels).sum().item()
+
+#         # plot_examples(adversarials_center_norm)
+#         # plot_examples(adversarials_norm)
+    
+#     accuracy = 100.0 * correct / len(trainset)
+#     return accuracy
 
 # check accuracy with 1 epsilon applied across entire image
 def validate_with_adversarial_examples(model, testloader, optimizer, criterion, epsilon):
@@ -348,18 +399,19 @@ def validate_with_adversarial_examples(model, testloader, optimizer, criterion, 
     accuracy = 100.0 * correct / len(trainset)
     return accuracy
 
-# show images
-def imshow(img):
-    img = img / 2 + 0.5 # unnormalize from [-1, 1] to [0, 1]
-    npimg = img.numpy()
-    displayed = np.transpose(npimg, (1, 2, 0))
-    plt.imshow(displayed)
-    # plt.imshow(displayed @ [0.299, 0.587, 0.113], cmap='gray') # grayscale display
-    plt.show()
+# # show images
+# def imshow(img):
+#     img = img / 2 + 0.5 # unnormalize from [-1, 1] to [0, 1]
+#     npimg = img.numpy()
+#     displayed = np.transpose(npimg, (1, 2, 0))
+#     plt.imshow(displayed)
+#     # plt.imshow(displayed @ [0.299, 0.587, 0.113], cmap='gray') # grayscale display
+#     plt.show()
 
-# plot grid of images
-def plot_examples(images):
-    imshow(torchvision.utils.make_grid(images))
+# # plot grid of images
+# def plot_examples(images):
+#     images = images.to(torch.device("cpu"))
+#     imshow(torchvision.utils.make_grid(images))
 
 if __name__ == '__main__':
     load_model(testloader)
